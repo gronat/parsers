@@ -27,7 +27,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(c
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from app.ai.parser.paystub.paystub_parser import PaystubParser
+from paystub.paystub_parser import PaystubParser
 
 # Page configuration
 st.set_page_config(
