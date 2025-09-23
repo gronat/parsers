@@ -33,7 +33,7 @@ st.set_page_config(
     page_title="Interactive Paystub Parser Dashboard",
     page_icon="💰",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # Custom CSS for better styling
@@ -145,6 +145,42 @@ def parse_uploaded_paystub(uploaded_file) -> Dict[str, Any]:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
+def parse_multiple_paystubs(uploaded_files) -> Dict[str, Dict[str, Any]]:
+    """
+    Parse multiple uploaded paystub PDF files
+    
+    Args:
+        uploaded_files: List of uploaded file objects from Streamlit
+        
+    Returns:
+        Dictionary mapping file names to parsed paystub data
+    """
+    results = {}
+    parser = initialize_parser()
+    
+    for uploaded_file in uploaded_files:
+        # Save uploaded file to temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_path = tmp_file.name
+        
+        try:
+            # Parse the paystub
+            result = parser.parse_pdf(tmp_path)
+            results[uploaded_file.name] = result
+        except Exception as e:
+            # Store error result for this file
+            results[uploaded_file.name] = {
+                'error': f"Failed to parse {uploaded_file.name}: {str(e)}",
+                'extraction_confidence': 0
+            }
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    
+    return results
+
 def display_parsing_status(result: Dict[str, Any]):
     """
     Display parsing status and basic information
@@ -154,7 +190,7 @@ def display_parsing_status(result: Dict[str, Any]):
     """
     if result.get('error'):
         st.markdown('<div class="parsing-status error-status">', unsafe_allow_html=True)
-        st.error(f"❌ Parsing Failed: {result['error']}")
+        st.error(f"Parsing Failed: {result['error']}")
         st.markdown('</div>', unsafe_allow_html=True)
         return False
     
@@ -162,23 +198,19 @@ def display_parsing_status(result: Dict[str, Any]):
     
     if confidence >= 0.95:
         status_class = "success-status"
-        status_icon = "✅"
         status_text = "Excellent"
     elif confidence >= 0.90:
         status_class = "success-status"
-        status_icon = "✅"
         status_text = "Very Good"
     elif confidence >= 0.85:
         status_class = "warning-status"
-        status_icon = "⚠️"
         status_text = "Good"
     else:
         status_class = "warning-status"
-        status_icon = "⚠️"
         status_text = "Needs Review"
     
     st.markdown(f'<div class="parsing-status {status_class}">', unsafe_allow_html=True)
-    st.success(f"{status_icon} Parsing {status_text} - Confidence: {confidence:.1%}")
+    st.success(f"Parsing {status_text} - Confidence: {confidence:.1%}")
     st.markdown('</div>', unsafe_allow_html=True)
     
     return True
@@ -190,12 +222,12 @@ def display_basic_info(result: Dict[str, Any]):
     Args:
         result: Parsed paystub data
     """
-    st.subheader("📋 Basic Information")
+    st.subheader("Basic Information")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("**👤 Employee Information**")
+        st.markdown("**Employee Information**")
         employee = result.get('employee', {})
         st.write(f"**Name:** {employee.get('name', 'N/A')}")
         st.write(f"**SSN:** {employee.get('ssn_masked', 'N/A')}")
@@ -205,7 +237,7 @@ def display_basic_info(result: Dict[str, Any]):
             st.write(f"**Address:** {address.get('street', '')}, {address.get('city', '')}, {address.get('state', '')} {address.get('zip', '')}")
     
     with col2:
-        st.markdown("**🏢 Employer Information**")
+        st.markdown("**Employer Information**")
         employer = result.get('employer', {})
         st.write(f"**Company:** {employer.get('company_name', 'N/A')}")
         st.write(f"**Employee ID:** {employer.get('employee_id', 'N/A')}")
@@ -213,15 +245,108 @@ def display_basic_info(result: Dict[str, Any]):
         emp_address = employer.get('address', {})
         if emp_address:
             st.write(f"**Address:** {emp_address.get('street', '')}, {emp_address.get('city', '')}, {emp_address.get('state', '')} {emp_address.get('zip', '')}")
+        
+        # Income Used toggle
+        st.markdown("**Income Used:**")
+        income_sources = ["Paystubs", "Personal Tax Returns", "1120's", "Other Business Income"]
+        selected_income = st.multiselect(
+            "Select income sources:",
+            options=income_sources,
+            default=["Paystubs"],
+            key=f"income_sources_{id(result)}"
+        )
+
+def calculate_income_classification(result: Dict[str, Any]) -> str:
+    """
+    Calculate income classification based on hours per week
+    
+    Args:
+        result: Parsed paystub data
+        
+    Returns:
+        'Part-time' or 'Full-time'
+    """
+    # Get total hours from earnings
+    total_hours = 0
+    earnings = result.get('earnings', [])
+    
+    for earning in earnings:
+        if not earning.get('is_employer_contribution', False):
+            hours = earning.get('hours', 0)
+            if hours and hours != 'N/A':
+                try:
+                    total_hours += float(hours)
+                except (ValueError, TypeError):
+                    pass
+    
+    # If no hours found in earnings, try to get from total_hours_current
+    if total_hours == 0:
+        total_hours = result.get('total_hours_current', 0)
+        if total_hours and total_hours != 'N/A':
+            try:
+                total_hours = float(total_hours)
+            except (ValueError, TypeError):
+                total_hours = 0
+    
+    # Determine classification
+    if total_hours >= 40:
+        return "Full-time"
+    else:
+        return "Part-time"
+
+def calculate_ytd_income_support(result: Dict[str, Any]) -> str:
+    """
+    Calculate YTD Income Support verification
+    
+    Args:
+        result: Parsed paystub data
+        
+    Returns:
+        'Yes - Verified' or 'No - Not Verified'
+    """
+    # Get current period gross pay
+    current_gross = float(result.get('gross_pay_current', 0) or 0)
+    ytd_gross = float(result.get('gross_pay_ytd', 0) or 0)
+    
+    if current_gross == 0 or ytd_gross == 0:
+        return "No - Not Verified"
+    
+    # Get pay frequency to calculate expected YTD
+    pay_frequency = result.get('pay_frequency', '').lower()
+    
+    # Calculate expected YTD based on frequency
+    if 'weekly' in pay_frequency:
+        expected_periods = 26  # 52 weeks / 2
+    elif 'bi-weekly' in pay_frequency or 'biweekly' in pay_frequency:
+        expected_periods = 13  # 26 bi-weekly periods / 2
+    elif 'semi-monthly' in pay_frequency or 'semimonthly' in pay_frequency:
+        expected_periods = 6   # 12 semi-monthly periods / 2
+    elif 'monthly' in pay_frequency:
+        expected_periods = 6   # 12 months / 2
+    else:
+        # Default to bi-weekly if unknown
+        expected_periods = 13
+    
+    expected_ytd = current_gross * expected_periods
+    
+    # Check if YTD is within 5% of expected
+    if expected_ytd > 0:
+        variance = abs(ytd_gross - expected_ytd) / expected_ytd
+        if variance <= 0.05:  # Within 5%
+            return "Yes - Verified"
+        else:
+            return "No - Not Verified"
+    
+    return "No - Not Verified"
 
 def display_payroll_period(result: Dict[str, Any]):
     """
-    Display payroll period information
+    Display payroll period information with income classification and YTD support
     
     Args:
         result: Parsed paystub data
     """
-    st.subheader("📅 Payroll Period")
+    st.subheader("Payroll Period & Income Analysis")
     
     payroll_period = result.get('payroll_period', {})
     col1, col2, col3 = st.columns(3)
@@ -233,8 +358,20 @@ def display_payroll_period(result: Dict[str, Any]):
     with col3:
         st.write(f"**Pay Date:** {payroll_period.get('pay_date', 'N/A')}")
     
-    pay_frequency = result.get('pay_frequency', 'N/A')
-    st.write(f"**Pay Frequency:** {pay_frequency}")
+    # Pay frequency and income classification
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        pay_frequency = result.get('pay_frequency', 'N/A')
+        st.write(f"**Pay Frequency:** {pay_frequency}")
+    
+    with col2:
+        income_classification = calculate_income_classification(result)
+        st.write(f"**Income Classification:** {income_classification}")
+    
+    with col3:
+        ytd_support = calculate_ytd_income_support(result)
+        st.write(f"**YTD Income Support:** {ytd_support}")
 
 def display_financial_summary(result: Dict[str, Any]):
     """
@@ -243,7 +380,7 @@ def display_financial_summary(result: Dict[str, Any]):
     Args:
         result: Parsed paystub data
     """
-    st.subheader("💰 Financial Summary")
+    st.subheader("Financial Summary")
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -288,7 +425,7 @@ def display_earnings_breakdown(result: Dict[str, Any]):
     Args:
         result: Parsed paystub data
     """
-    st.subheader("💵 Earnings Breakdown")
+    st.subheader("Earnings Breakdown")
     
     earnings = result.get('earnings', [])
     if not earnings:
@@ -360,7 +497,7 @@ def display_deductions_breakdown(result: Dict[str, Any]):
     Args:
         result: Parsed paystub data
     """
-    st.subheader("💸 Deductions Breakdown")
+    st.subheader("Deductions Breakdown")
     
     deductions = result.get('deductions', [])
     if not deductions:
@@ -420,7 +557,7 @@ def display_taxes_breakdown(result: Dict[str, Any]):
     Args:
         result: Parsed paystub data
     """
-    st.subheader("🏛️ Taxes Breakdown")
+    st.subheader("Taxes Breakdown")
     
     taxes = result.get('taxes', [])
     if not taxes:
@@ -473,24 +610,25 @@ def display_validation_warnings(result: Dict[str, Any]):
     """
     warnings = result.get('validation_warnings', [])
     if warnings:
-        st.subheader("⚠️ Validation Warnings")
+        st.subheader("Validation Warnings")
         
         for warning in warnings:
             st.markdown('<div class="warning-box">', unsafe_allow_html=True)
             st.warning(warning)
             st.markdown('</div>', unsafe_allow_html=True)
     else:
-        st.subheader("✅ Validation Status")
+        st.subheader("Validation Status")
         st.success("No validation warnings - all data looks good!")
 
-def create_earnings_visualization(result: Dict[str, Any]):
+def create_earnings_visualization(result: Dict[str, Any], chart_key: str = ""):
     """
     Create earnings visualization charts
     
     Args:
         result: Parsed paystub data
+        chart_key: Unique key for this chart to avoid duplicate element IDs
     """
-    st.subheader("📊 Earnings Visualization")
+    st.subheader("Earnings Visualization")
     
     earnings = result.get('earnings', [])
     if not earnings:
@@ -524,7 +662,7 @@ def create_earnings_visualization(result: Dict[str, Any]):
                 title="Employee Earnings Breakdown",
                 color_discrete_sequence=px.colors.qualitative.Set2
             )
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, use_container_width=True, key=f"earnings_pie_{chart_key}")
         else:
             st.info("No employee earnings data for visualization")
     
@@ -542,18 +680,19 @@ def create_earnings_visualization(result: Dict[str, Any]):
                 color_discrete_map={'Employee': '#4caf50', 'Employer': '#2196f3'}
             )
             fig_bar.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_bar, use_container_width=True, key=f"earnings_bar_{chart_key}")
         else:
             st.info("No earnings data for visualization")
 
-def create_deductions_visualization(result: Dict[str, Any]):
+def create_deductions_visualization(result: Dict[str, Any], chart_key: str = ""):
     """
     Create deductions visualization charts
     
     Args:
         result: Parsed paystub data
+        chart_key: Unique key for this chart to avoid duplicate element IDs
     """
-    st.subheader("📊 Deductions Visualization")
+    st.subheader("Deductions Visualization")
     
     deductions = result.get('deductions', [])
     if not deductions:
@@ -586,7 +725,7 @@ def create_deductions_visualization(result: Dict[str, Any]):
                 title="Deductions Breakdown",
                 color_discrete_sequence=px.colors.qualitative.Set3
             )
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, use_container_width=True, key=f"deductions_pie_{chart_key}")
         
         with col2:
             # Deductions by type bar chart
@@ -599,16 +738,299 @@ def create_deductions_visualization(result: Dict[str, Any]):
                 color_discrete_map={'Pre-Tax': '#ff9800', 'Post-Tax': '#f44336'}
             )
             fig_bar.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_bar, use_container_width=True, key=f"deductions_bar_{chart_key}")
 
-def export_results(result: Dict[str, Any]):
+def calculate_monthly_qualifying_income(result: Dict[str, Any]) -> float:
+    """
+    Calculate monthly qualifying income based on pay frequency
+    
+    Args:
+        result: Parsed paystub data
+        
+    Returns:
+        Monthly qualifying income amount
+    """
+    current_gross = float(result.get('gross_pay_current', 0) or 0)
+    pay_frequency = result.get('pay_frequency', '').lower()
+    
+    if current_gross == 0:
+        return 0.0
+    
+    # Convert to monthly based on pay frequency
+    if 'weekly' in pay_frequency:
+        return current_gross * 4.33  # 52 weeks / 12 months
+    elif 'bi-weekly' in pay_frequency or 'biweekly' in pay_frequency:
+        return current_gross * 2.17  # 26 bi-weekly periods / 12 months
+    elif 'semi-monthly' in pay_frequency or 'semimonthly' in pay_frequency:
+        return current_gross * 2  # 24 semi-monthly periods / 12 months
+    elif 'monthly' in pay_frequency:
+        return current_gross
+    else:
+        # Default to bi-weekly if unknown
+        return current_gross * 2.17
+
+def display_total_monthly_income(results: Dict[str, Dict[str, Any]]):
+    """
+    Display total monthly qualifying income for all sources
+    
+    Args:
+        results: Dictionary mapping file names to parsed paystub data
+    """
+    st.subheader("💰 Total Monthly Qualifying Income")
+    
+    # Calculate monthly income for each source
+    income_sources = []
+    total_monthly_income = 0
+    
+    for file_name, result in results.items():
+        if not result.get('error'):
+            employee = result.get('employee', {})
+            employer = result.get('employer', {})
+            monthly_income = calculate_monthly_qualifying_income(result)
+            
+            if monthly_income > 0:
+                income_sources.append({
+                    'Source': f"{employee.get('name', 'Unknown')} - {employer.get('company_name', 'Unknown Company')}",
+                    'Type': 'Paystubs',
+                    'Monthly Income': f"${monthly_income:,.2f}",
+                    'File': file_name
+                })
+                total_monthly_income += monthly_income
+    
+    # Display income sources
+    if income_sources:
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.markdown("**Income Sources:**")
+            for source in income_sources:
+                st.write(f"• {source['Source']}: {source['Monthly Income']}")
+        
+        with col2:
+            st.markdown("**Total Monthly Income:**")
+            st.metric(
+                label="Qualifying Income",
+                value=f"${total_monthly_income:,.2f}",
+                help="Sum of all monthly qualifying income sources"
+            )
+    else:
+        st.info("No qualifying income sources found")
+
+def display_multiple_files_summary(results: Dict[str, Dict[str, Any]]):
+    """
+    Display summary of all uploaded files
+    
+    Args:
+        results: Dictionary mapping file names to parsed paystub data
+    """
+    st.subheader("📊 Files Summary")
+    
+    # Create summary data
+    summary_data = []
+    total_files = len(results)
+    successful_parses = 0
+    total_gross_pay = 0
+    total_net_pay = 0
+    
+    for file_name, result in results.items():
+        if result.get('error'):
+            status = "❌ Error"
+            confidence = 0
+            gross_pay = 0
+            net_pay = 0
+        else:
+            status = "✅ Success"
+            confidence = result.get('extraction_confidence', 0) or 0
+            gross_pay = float(result.get('gross_pay_current', 0) or 0)
+            net_pay = float(result.get('net_pay_current', 0) or 0)
+            successful_parses += 1
+            total_gross_pay += gross_pay
+            total_net_pay += net_pay
+        
+        employee_name = result.get('employee', {}).get('name', 'N/A') if not result.get('error') else 'N/A'
+        employer_name = result.get('employer', {}).get('company_name', 'N/A') if not result.get('error') else 'N/A'
+        
+        summary_data.append({
+            'File Name': file_name,
+            'Status': status,
+            'Employee': employee_name,
+            'Employer': employer_name,
+            'Gross Pay': f"${gross_pay:,.2f}",
+            'Net Pay': f"${net_pay:,.2f}",
+            'Confidence': f"{confidence:.1%}"
+        })
+    
+    # Display summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Files", total_files)
+    
+    with col2:
+        st.metric("Successful Parses", f"{successful_parses}/{total_files}")
+    
+    with col3:
+        st.metric("Total Gross Pay", f"${total_gross_pay:,.2f}")
+    
+    with col4:
+        st.metric("Total Net Pay", f"${total_net_pay:,.2f}")
+    
+    # Display summary table
+    if summary_data:
+        df = pd.DataFrame(summary_data)
+        st.dataframe(df, use_container_width=True)
+
+def display_document_details(doc: Dict[str, Any], file_name: str, index: int):
+    """
+    Display detailed information for a single paystub document in a collapsible section
+    
+    Args:
+        doc: Paystub document data
+        file_name: Name of the file
+        index: Document index
+    """
+    # Determine status text
+    if doc.get('error'):
+        status_text = "Error"
+    else:
+        confidence = doc.get('extraction_confidence', 0) or 0
+        if confidence >= 0.95:
+            status_text = "Excellent"
+        elif confidence >= 0.90:
+            status_text = "Very Good"
+        elif confidence >= 0.85:
+            status_text = "Good"
+        else:
+            status_text = "Needs Review"
+    
+    # Check for validation warnings
+    warnings = doc.get('validation_warnings', [])
+    has_warnings = warnings and len(warnings) > 0
+    
+    # Create expander title with status and warning indicator
+    if has_warnings:
+        expander_title = f"Document {index + 1}: {file_name} ({status_text}) - Warning"
+    else:
+        expander_title = f"Document {index + 1}: {file_name} ({status_text})"
+    
+    with st.expander(expander_title, expanded=False):
+        
+        # Display parsing status
+        if not display_parsing_status(doc):
+            return
+        
+        # Basic Information
+        display_basic_info(doc)
+        
+        # Payroll period
+        display_payroll_period(doc)
+        
+        # Financial summary
+        display_financial_summary(doc)
+        
+        # Earnings breakdown
+        display_earnings_breakdown(doc)
+        
+        # Deductions breakdown
+        display_deductions_breakdown(doc)
+        
+        # Taxes breakdown
+        display_taxes_breakdown(doc)
+        
+        # Validation warnings
+        display_validation_warnings(doc)
+        
+        # Visualizations
+        chart_key = f"{index}_{file_name.replace('.', '_').replace(' ', '_')}"
+        create_earnings_visualization(doc, chart_key)
+        create_deductions_visualization(doc, chart_key)
+        
+        # Export options for individual file
+        st.markdown("---")
+        # Create unique key from file name and index
+        file_key = f"{index}_{file_name.replace('.', '_').replace(' ', '_')}"
+        export_results(doc, file_key)
+
+def export_multiple_results(results: Dict[str, Dict[str, Any]]):
+    """
+    Provide export options for multiple parsed results
+    
+    Args:
+        results: Dictionary mapping file names to parsed paystub data
+    """
+    st.subheader("Export Results")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Combined JSON export
+        json_data = json.dumps(results, indent=2, default=str)
+        st.download_button(
+            label="Download All as JSON",
+            data=json_data,
+            file_name=f"paystubs_parsed_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            key="multiple_json_download"
+        )
+    
+    with col2:
+        # Summary CSV export for all files
+        summary_data = []
+        
+        for file_name, result in results.items():
+            if not result.get('error'):
+                employee = result.get('employee', {})
+                employer = result.get('employer', {})
+                
+                summary_data.append({
+                    'File Name': file_name,
+                    'Employee Name': employee.get('name', 'N/A'),
+                    'Employer Name': employer.get('company_name', 'N/A'),
+                    'Pay Period Start': result.get('payroll_period', {}).get('start_date', 'N/A'),
+                    'Pay Period End': result.get('payroll_period', {}).get('end_date', 'N/A'),
+                    'Gross Pay Current': f"${float(result.get('gross_pay_current', 0) or 0):,.2f}",
+                    'Net Pay Current': f"${float(result.get('net_pay_current', 0) or 0):,.2f}",
+                    'Gross Pay YTD': f"${float(result.get('gross_pay_ytd', 0) or 0):,.2f}",
+                    'Total Deductions': f"${sum(float(d.get('current_amount', 0) or 0) for d in result.get('deductions', [])):,.2f}",
+                    'Total Taxes': f"${sum(float(t.get('current_amount', 0) or 0) for t in result.get('taxes', [])):,.2f}",
+                    'Confidence Score': f"{(result.get('extraction_confidence', 0) or 0):.2%}"
+                })
+            else:
+                summary_data.append({
+                    'File Name': file_name,
+                    'Employee Name': 'ERROR',
+                    'Employer Name': 'ERROR',
+                    'Pay Period Start': 'ERROR',
+                    'Pay Period End': 'ERROR',
+                    'Gross Pay Current': 'ERROR',
+                    'Net Pay Current': 'ERROR',
+                    'Gross Pay YTD': 'ERROR',
+                    'Total Deductions': 'ERROR',
+                    'Total Taxes': 'ERROR',
+                    'Confidence Score': '0.0%'
+                })
+        
+        if summary_data:
+            summary_df = pd.DataFrame(summary_data)
+            csv_data = summary_df.to_csv(index=False)
+            
+            st.download_button(
+                label="Download Summary as CSV",
+                data=csv_data,
+                file_name=f"paystubs_summary_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                key="multiple_csv_download"
+            )
+
+def export_results(result: Dict[str, Any], file_key: str = ""):
     """
     Provide export options for the parsed results
     
     Args:
         result: Parsed paystub data
+        file_key: Unique key for this file to avoid duplicate element IDs
     """
-    st.subheader("📥 Export Results")
+    st.subheader("Export Results")
     
     col1, col2 = st.columns(2)
     
@@ -616,10 +1038,11 @@ def export_results(result: Dict[str, Any]):
         # JSON export
         json_data = json.dumps(result, indent=2, default=str)
         st.download_button(
-            label="📄 Download as JSON",
+            label="Download as JSON",
             data=json_data,
             file_name=f"paystub_parsed_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-            mime="application/json"
+            mime="application/json",
+            key=f"json_download_{file_key}"
         )
     
     with col2:
@@ -658,10 +1081,11 @@ def export_results(result: Dict[str, Any]):
         csv_data = summary_df.to_csv(index=False)
         
         st.download_button(
-            label="📊 Download Summary as CSV",
+            label="Download Summary as CSV",
             data=csv_data,
             file_name=f"paystub_summary_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
+            mime="text/csv",
+            key=f"csv_download_{file_key}"
         )
 
 def main():
@@ -671,87 +1095,158 @@ def main():
     st.markdown('<h1 class="main-header">💰 Interactive Paystub Parser Dashboard</h1>', unsafe_allow_html=True)
     st.markdown("**Upload paystub PDFs, parse them in real-time, and drill down into detailed results**")
     
-    # Sidebar
-    st.sidebar.header("🔧 Parser Settings")
-    
     # API Key check
     if not os.getenv('OPENAI_API_KEY'):
-        st.sidebar.error("⚠️ OpenAI API key not found. Please set OPENAI_API_KEY environment variable.")
         st.error("OpenAI API key is required for GPT-4 Vision analysis. Please set the OPENAI_API_KEY environment variable.")
         return
     
     # Upload section
     st.markdown('<div class="upload-section">', unsafe_allow_html=True)
-    st.markdown("### 📁 Upload Paystub PDF")
-    uploaded_file = st.file_uploader(
-        "Choose a paystub PDF file",
-        type=['pdf'],
-        help="Upload a paystub PDF file to parse and analyze"
+    st.markdown("### 📁 Upload Paystub PDFs")
+    
+    # Upload mode selection
+    upload_mode = st.radio(
+        "Choose upload mode:",
+        ["Single File", "Multiple Files"],
+        index=1,  # Default to "Multiple Files"
+        horizontal=True,
+        help="Select whether to upload one file or multiple files at once"
     )
+    
+    if upload_mode == "Single File":
+        uploaded_files = st.file_uploader(
+            "Choose a paystub PDF file",
+            type=['pdf'],
+            help="Upload a paystub PDF file to parse and analyze"
+        )
+        if uploaded_files:
+            uploaded_files = [uploaded_files]  # Convert to list for consistency
+    else:
+        uploaded_files = st.file_uploader(
+            "Choose paystub PDF files",
+            type=['pdf'],
+            accept_multiple_files=True,
+            help="Upload multiple paystub PDF files to parse and analyze"
+        )
+    
     st.markdown('</div>', unsafe_allow_html=True)
     
-    if uploaded_file is not None:
+    if uploaded_files is not None and len(uploaded_files) > 0:
         # Display file info
-        st.info(f"📄 **File:** {uploaded_file.name} ({uploaded_file.size:,} bytes)")
+        if len(uploaded_files) == 1:
+            st.info(f"📄 **File:** {uploaded_files[0].name} ({uploaded_files[0].size:,} bytes)")
+        else:
+            file_info = []
+            total_size = 0
+            for file in uploaded_files:
+                file_info.append(f"{file.name} ({file.size:,} bytes)")
+                total_size += file.size
+            st.info(f"📄 **Files:** {len(uploaded_files)} files selected (Total: {total_size:,} bytes)")
+            for info in file_info:
+                st.write(f"  • {info}")
         
         # Parse button
-        if st.button("🚀 Parse Paystub Document", type="primary"):
-            with st.spinner("Parsing paystub document... This may take 15-45 seconds."):
-                # Parse the uploaded file
-                result = parse_uploaded_paystub(uploaded_file)
-                
-                # Store result in session state
-                st.session_state.parsed_result = result
-                st.session_state.file_name = uploaded_file.name
+        button_text = f"🚀 Parse {'Paystub Document' if len(uploaded_files) == 1 else f'{len(uploaded_files)} Paystub Documents'}"
+        if st.button(button_text, type="primary"):
+            if len(uploaded_files) == 1:
+                # Single file processing
+                with st.spinner("Parsing paystub document... This may take 15-45 seconds."):
+                    result = parse_uploaded_paystub(uploaded_files[0])
+                    results = {uploaded_files[0].name: result}
+            else:
+                # Multiple files processing
+                with st.spinner(f"Parsing {len(uploaded_files)} paystub documents... This may take several minutes."):
+                    results = parse_multiple_paystubs(uploaded_files)
+            
+            # Store results in session state
+            st.session_state.parsed_results = results
+            st.session_state.uploaded_files = uploaded_files
         
         # Display results if available
-        if 'parsed_result' in st.session_state:
-            result = st.session_state.parsed_result
-            file_name = st.session_state.get('file_name', 'Unknown')
+        if 'parsed_results' in st.session_state:
+            results = st.session_state.parsed_results
+            uploaded_files = st.session_state.get('uploaded_files', [])
             
             st.markdown("---")
-            st.markdown(f"## 📋 Parsed Results: {file_name}")
             
-            # Display parsing status
-            if display_parsing_status(result):
+            if len(results) == 1:
+                # Single file display (original behavior)
+                file_name = list(results.keys())[0]
+                result = results[file_name]
                 
-                # Basic information
-                display_basic_info(result)
+                st.markdown(f"## 📋 Parsed Results: {file_name}")
                 
-                # Payroll period
-                display_payroll_period(result)
+                # Display parsing status
+                if display_parsing_status(result):
+                    
+                    # Basic information
+                    display_basic_info(result)
+                    
+                    # Payroll period
+                    display_payroll_period(result)
+                    
+                    # Financial summary
+                    display_financial_summary(result)
+                    
+                    # Earnings breakdown
+                    display_earnings_breakdown(result)
+                    
+                    # Deductions breakdown
+                    display_deductions_breakdown(result)
+                    
+                    # Taxes breakdown
+                    display_taxes_breakdown(result)
+                    
+                    # Validation warnings
+                    display_validation_warnings(result)
+                    
+                    # Visualizations
+                    chart_key = f"single_{file_name.replace('.', '_').replace(' ', '_')}"
+                    create_earnings_visualization(result, chart_key)
+                    create_deductions_visualization(result, chart_key)
+                    
+                    # Export options
+                    file_key = f"single_{file_name.replace('.', '_').replace(' ', '_')}"
+                    export_results(result, file_key)
+            else:
+                # Multiple files display
+                st.markdown(f"## 📋 Parsed Results: {len(results)} Files")
                 
-                # Financial summary
-                display_financial_summary(result)
+                # Display total monthly qualifying income at the top
+                display_total_monthly_income(results)
                 
-                # Earnings breakdown
-                display_earnings_breakdown(result)
+                # Display files summary
+                display_multiple_files_summary(results)
                 
-                # Deductions breakdown
-                display_deductions_breakdown(result)
+                # Detailed document view with collapsible sections
+                st.markdown("---")
+                st.markdown("### 📄 Detailed Document Review")
                 
-                # Taxes breakdown
-                display_taxes_breakdown(result)
+                for index, (file_name, result) in enumerate(results.items()):
+                    display_document_details(result, file_name, index)
                 
-                # Validation warnings
-                display_validation_warnings(result)
-                
-                # Visualizations
-                create_earnings_visualization(result)
-                create_deductions_visualization(result)
-                
-                # Export options
-                export_results(result)
+                # Export options for multiple files
+                st.markdown("---")
+                export_multiple_results(results)
     
     else:
         # Show instructions when no file is uploaded
         st.markdown("""
         ## 🚀 How to Use This Dashboard
         
-        1. **Upload a paystub PDF** using the file uploader above
-        2. **Click "Parse Paystub Document"** to process the file
-        3. **Review the results** in the detailed breakdown below
-        4. **Export the data** in JSON or CSV format
+        1. **Choose upload mode**: Single file or multiple files
+        2. **Upload paystub PDF(s)** using the file uploader above
+        3. **Click "Parse Paystub Document(s)"** to process the file(s)
+        4. **Review the results** in the detailed breakdown below
+        5. **Export the data** in JSON or CSV format
+        
+        ### 📁 Multiple File Upload Features
+        
+        - **Batch Processing**: Upload and parse multiple paystubs at once
+        - **Summary View**: See overview of all uploaded files with status indicators
+        - **Individual Details**: Select any file to view detailed breakdown
+        - **Bulk Export**: Download all results as combined JSON or summary CSV
+        - **Progress Tracking**: Monitor parsing progress for multiple files
         
         ### 📋 What Gets Extracted
         
@@ -773,7 +1268,8 @@ def main():
         
         ### ⚡ Processing Time
         
-        - **Typical processing time**: 15-45 seconds per document
+        - **Single file**: 15-45 seconds per document
+        - **Multiple files**: 15-45 seconds per document (processed sequentially)
         - **Factors affecting speed**: PDF complexity, image quality, API response time
         - **Confidence score**: Higher scores indicate more reliable extraction
         
@@ -783,6 +1279,7 @@ def main():
         - **Data Quality**: Validates reasonable pay rates and amounts
         - **Structure Validation**: Ensures proper paystub format recognition
         - **Warning System**: Flags potential issues for manual review
+        - **Error Handling**: Graceful handling of parsing failures in batch mode
         """)
     
     # Footer
