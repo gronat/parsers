@@ -254,7 +254,7 @@ def display_financial_summary(result: Dict[str, Any]):
     
     # Calculate additional metrics
     income_classification = calculate_income_classification(result)
-    ytd_income_support = calculate_ytd_income_support(result)
+    ytd_income_support, ytd_reason = calculate_ytd_income_support(result)
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -308,7 +308,7 @@ def display_financial_summary(result: Dict[str, Any]):
         if ytd_income_support == "Yes - Verified":
             st.success("Income data is consistent and verified")
         else:
-            st.warning("Income data may need additional verification")
+            st.warning(f"**Issue:** {ytd_reason}")
 
 def display_detailed_breakdown(result: Dict[str, Any]):
     """
@@ -493,32 +493,56 @@ def calculate_income_classification(result: Dict[str, Any]) -> str:
     else:
         return "Full-time"
 
-def calculate_ytd_income_support(result: Dict[str, Any]) -> str:
+def calculate_ytd_income_support(result: Dict[str, Any]) -> tuple[str, str]:
     """
-    Calculate YTD income support verification
+    Calculate YTD income support verification with detailed feedback
     
     Args:
         result: Parsed W-2 data
         
     Returns:
-        "Yes - Verified" or "No - Not Verified"
+        Tuple of (verification_status, detailed_reason)
     """
-    # For W-2s, we don't have YTD vs current paystub comparison
-    # We'll verify based on consistency within the W-2 data
     income_info = result.get('income_tax_info', {})
     wages = income_info.get('wages_tips_compensation', 0) or 0
     ss_wages = income_info.get('social_security_wages', 0) or 0
     medicare_wages = income_info.get('medicare_wages_tips', 0) or 0
+    federal_tax = income_info.get('federal_income_tax_withheld', 0) or 0
     
-    # Check if wages are consistent across different boxes
-    # Wages should be similar across Box 1, 3, and 5 (with some exceptions for retirement plans)
-    if wages > 0 and ss_wages > 0 and medicare_wages > 0:
-        # Check if wages are within reasonable range of each other
-        wage_consistency = abs(wages - ss_wages) / max(wages, 1) < 0.05  # Within 5%
-        if wage_consistency:
-            return "Yes - Verified"
+    # Check for basic data completeness
+    missing_fields = []
+    if wages <= 0:
+        missing_fields.append("Box 1 (Wages) is missing or zero")
+    if ss_wages <= 0:
+        missing_fields.append("Box 3 (SS Wages) is missing or zero")
+    if medicare_wages <= 0:
+        missing_fields.append("Box 5 (Medicare Wages) is missing or zero")
+    if federal_tax < 0:
+        missing_fields.append("Box 2 (Federal Tax) has invalid value")
     
-    return "No - Not Verified"
+    if missing_fields:
+        return "No - Not Verified", f"Missing or invalid data: {', '.join(missing_fields)}"
+    
+    # Check for reasonable income amounts
+    if wages > 1000000:  # Over $1M might need verification
+        return "No - Not Verified", f"Unusually high income (${wages:,.0f}) - may need additional verification"
+    
+    if wages < 1000:  # Under $1K might be incomplete
+        return "No - Not Verified", f"Very low income (${wages:,.0f}) - may be incomplete or part-time"
+    
+    # Check for box consistency (with more realistic tolerance)
+    if wages > 0 and ss_wages > 0:
+        wage_diff_percent = abs(wages - ss_wages) / max(wages, 1) * 100
+        if wage_diff_percent > 20:  # More realistic 20% tolerance
+            return "No - Not Verified", f"Significant difference between Box 1 (${wages:,.0f}) and Box 3 (${ss_wages:,.0f}) - {wage_diff_percent:.1f}% difference may indicate retirement contributions or data issues"
+    
+    # Check tax year
+    tax_year = result.get('tax_year', '')
+    if not tax_year or int(tax_year) < 2020:
+        return "No - Not Verified", f"Old or missing tax year ({tax_year}) - current year W-2s preferred"
+    
+    # All checks passed
+    return "Yes - Verified", "All income data appears consistent and complete"
 
 def calculate_monthly_qualifying_income(result: Dict[str, Any]) -> float:
     """
@@ -768,19 +792,22 @@ def display_document_details(doc: Dict[str, Any], file_name: str, index: int):
         # Basic information
         file_key = f"{index}_{file_name.replace('.', '_').replace(' ', '_')}"
         display_basic_info(doc, file_key)
+        st.markdown("---")
         
         # Financial summary
         display_financial_summary(doc)
+        st.markdown("---")
         
         # Detailed breakdown
         display_detailed_breakdown(doc)
+        st.markdown("---")
         
         # Income visualization
         chart_key = f"{index}_{file_name.replace('.', '_').replace(' ', '_')}"
         create_income_visualization(doc, chart_key)
+        st.markdown("---")
         
         # Export options for individual file
-        st.markdown("---")
         file_key = f"{index}_{file_name.replace('.', '_').replace(' ', '_')}"
         export_results(doc, file_key)
 

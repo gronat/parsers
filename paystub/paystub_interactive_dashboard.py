@@ -294,22 +294,29 @@ def calculate_income_classification(result: Dict[str, Any]) -> str:
     else:
         return "Part-time"
 
-def calculate_ytd_income_support(result: Dict[str, Any]) -> str:
+def calculate_ytd_income_support(result: Dict[str, Any]) -> tuple[str, str]:
     """
-    Calculate YTD Income Support verification
+    Calculate YTD Income Support verification with detailed feedback
     
     Args:
         result: Parsed paystub data
         
     Returns:
-        'Yes - Verified' or 'No - Not Verified'
+        Tuple of (verification_status, detailed_reason)
     """
     # Get current period gross pay
     current_gross = float(result.get('gross_pay_current', 0) or 0)
     ytd_gross = float(result.get('gross_pay_ytd', 0) or 0)
     
-    if current_gross == 0 or ytd_gross == 0:
-        return "No - Not Verified"
+    # Check for missing data
+    missing_fields = []
+    if current_gross == 0:
+        missing_fields.append("Current period gross pay is missing or zero")
+    if ytd_gross == 0:
+        missing_fields.append("YTD gross pay is missing or zero")
+    
+    if missing_fields:
+        return "No - Not Verified", f"Missing data: {', '.join(missing_fields)}"
     
     # Get pay frequency to calculate expected YTD
     pay_frequency = result.get('pay_frequency', '').lower()
@@ -317,27 +324,37 @@ def calculate_ytd_income_support(result: Dict[str, Any]) -> str:
     # Calculate expected YTD based on frequency
     if 'weekly' in pay_frequency:
         expected_periods = 26  # 52 weeks / 2
+        frequency_desc = "weekly"
     elif 'bi-weekly' in pay_frequency or 'biweekly' in pay_frequency:
         expected_periods = 13  # 26 bi-weekly periods / 2
+        frequency_desc = "bi-weekly"
     elif 'semi-monthly' in pay_frequency or 'semimonthly' in pay_frequency:
         expected_periods = 6   # 12 semi-monthly periods / 2
+        frequency_desc = "semi-monthly"
     elif 'monthly' in pay_frequency:
         expected_periods = 6   # 12 months / 2
+        frequency_desc = "monthly"
     else:
         # Default to bi-weekly if unknown
         expected_periods = 13
+        frequency_desc = "bi-weekly (assumed)"
     
     expected_ytd = current_gross * expected_periods
     
     # Check if YTD is within 5% of expected
     if expected_ytd > 0:
         variance = abs(ytd_gross - expected_ytd) / expected_ytd
+        variance_percent = variance * 100
+        
         if variance <= 0.05:  # Within 5%
-            return "Yes - Verified"
+            return "Yes - Verified", f"YTD income (${ytd_gross:,.2f}) matches expected amount (${expected_ytd:,.2f}) for {frequency_desc} pay"
         else:
-            return "No - Not Verified"
+            if ytd_gross > expected_ytd:
+                return "No - Not Verified", f"YTD income (${ytd_gross:,.2f}) is {variance_percent:.1f}% higher than expected (${expected_ytd:,.2f}) for {frequency_desc} pay - may indicate raises, bonuses, or overtime"
+            else:
+                return "No - Not Verified", f"YTD income (${ytd_gross:,.2f}) is {variance_percent:.1f}% lower than expected (${expected_ytd:,.2f}) for {frequency_desc} pay - may indicate recent start date, reduced hours, or missing pay periods"
     
-    return "No - Not Verified"
+    return "No - Not Verified", "Unable to calculate expected YTD income"
 
 def display_payroll_period(result: Dict[str, Any]):
     """
@@ -370,8 +387,12 @@ def display_payroll_period(result: Dict[str, Any]):
         st.write(f"**Income Classification:** {income_classification}")
     
     with col3:
-        ytd_support = calculate_ytd_income_support(result)
+        ytd_support, ytd_reason = calculate_ytd_income_support(result)
         st.write(f"**YTD Income Support:** {ytd_support}")
+        if ytd_support == "No - Not Verified":
+            st.warning(f"**Issue:** {ytd_reason}")
+        else:
+            st.success(f"**Details:** {ytd_reason}")
 
 def display_financial_summary(result: Dict[str, Any]):
     """
@@ -921,21 +942,27 @@ def display_document_details(doc: Dict[str, Any], file_name: str, index: int):
         
         # Basic Information
         display_basic_info(doc)
+        st.markdown("---")
         
         # Payroll period
         display_payroll_period(doc)
+        st.markdown("---")
         
         # Financial summary
         display_financial_summary(doc)
+        st.markdown("---")
         
         # Earnings breakdown
         display_earnings_breakdown(doc)
+        st.markdown("---")
         
         # Deductions breakdown
         display_deductions_breakdown(doc)
+        st.markdown("---")
         
         # Taxes breakdown
         display_taxes_breakdown(doc)
+        st.markdown("---")
         
         # Validation warnings
         display_validation_warnings(doc)
@@ -944,9 +971,9 @@ def display_document_details(doc: Dict[str, Any], file_name: str, index: int):
         chart_key = f"{index}_{file_name.replace('.', '_').replace(' ', '_')}"
         create_earnings_visualization(doc, chart_key)
         create_deductions_visualization(doc, chart_key)
+        st.markdown("---")
         
         # Export options for individual file
-        st.markdown("---")
         # Create unique key from file name and index
         file_key = f"{index}_{file_name.replace('.', '_').replace(' ', '_')}"
         export_results(doc, file_key)
